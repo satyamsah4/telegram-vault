@@ -1,0 +1,476 @@
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { v } from "convex/values";
+import {
+  CHUNK_BYTES,
+  DOWNLOAD_TOKEN_TTL_MS,
+  MAX_NAME_LENGTH,
+} from "../lib/constants";
+import type { Doc, Id } from "./_generated/dataModel";
+import {
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+  type MutationCtx,
+  type QueryCtx,
+} from "./_generated/server";
+
+/** Rejects anonymous callers with a message the UI can surface. */
+async function requireUser(
+  ctx: QueryCtx | MutationCtx,
+): Promise<Id<"users">> {
+  const userId = await getAuthUserId(ctx);
+  if (userId === null) throw new Error("You need to sign in to do that.");
+  return userId;
+}
+
+/** Normalises user-supplied names: trimmed, flat, bounded. */
+function cleanName(raw: string): string {
+  const cleaned = raw
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .replace(/[\\/]+/g, "-");
+  if (!cleaned) throw new Error("Give it a name first.");
+  if (cleaned.length > MAX_NAME_LENGTH) {
+    throw new Error(`Names are limited to ${MAX_NAME_LENGTH} characters.`);
+  }
+  return cleaned;
+}
+
+async function getOwnedFolder(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<"users">,
+  folderId: Id<"folders">,
+): Promise<Doc<"folders">> {
+  const folder = await ctx.db.get(folderId);
+  if (!folder || folder.userId !== userId || !("parentId" in folder)) {
+    throw new Error("That folder no longer exists.");
+  }
+  return folder;
+}
+
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
+
+export const listFolders = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUser(ctx);
+    return await ctx.db
+      .query("folders")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+  },
+});
+
+export const listFiles = query({
+  args: { folderId: v.union(v.id("folders"), v.null()) },
+  handler: async (ctx, { folderId }) => {
+    const userId = await requireUser(ctx);
+    if (folderId !== null) await getOwnedFolder(ctx, userId, folderId);
+    const files = await ctx.db
+      .query("files")
+      .withIndex("by_user_folder", (q) =>
+        q.eq("userId", userId).eq("folderId", folderId),
+      )
+      .collect();
+    // Parts (the Telegram handles) stay on the server; the list never needs them.
+    return files.map(({ parts: _parts, ...file }) => file);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Folders
+// ---------------------------------------------------------------------------
+
+export const createFolder = mutation({
+  args: {
+    name: v.string(),
+    parentId: v.union(v.id("folders"), v.null()),
+  },
+  handler: async (ctx, { name, parentId }) => {
+    const userId = await requireUser(ctx);
+    if (parentId !== null) await getOwnedFolder(ctx, userId, parentId);
+    return await ctx.db.insert("folders", {
+      name: cleanName(name),
+      parentId,
+      userId,
+      createdAt: Date.now(),
+    });
+  },
+});
+
+export const renameFolder = mutation({
+  args: { folderId: v.id("folders"), name: v.string() },
+  handler: async (ctx, { folderId, name }) => {
+    const userId = await requireUser(ctx);
+    const folder = await getOwnedFolder(ctx, userId, folderId);
+    await ctx.db.patch(folder._id, { name: cleanName(name) });
+  },
+});
+
+export const moveFolder = mutation({
+  args: {
+    folderId: v.id("folders"),
+    parentId: v.union(v.id("folders"), v.null()),
+  },
+  handler: async (ctx, { folderId, parentId }) => {
+    const userId = await requireUser(ctx);
+    const folder = await getOwnedFolder(ctx, userId, folderId);
+    if (parentId === null) {
+      await ctx.db.patch(folder._id, { parentId: null });
+      return;
+    }
+    if (parentId === folderId) throw new Error("A folder can't live inside itself.");
+    // Walk up from the destination: landing back on this folder means a cycle.
+    let cursor: Id<"folders"> | null = parentId;
+    while (cursor !== null) {
+      if (cursor === folderId) {
+        throw new Error("That destination is inside this folder.");
+      }
+      const parent = await getOwnedFolder(ctx, userId, cursor);
+      cursor = parent.parentId;
+    }
+    await ctx.db.patch(folder._id, { parentId });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+export const createFile = mutation({
+  args: {
+    name: v.string(),
+    size: v.number(),
+    mimeType: v.string(),
+    folderId: v.union(v.id("folders"), v.null()),
+  },
+  handler: async (ctx, { name, size, mimeType, folderId }) => {
+    const userId = await requireUser(ctx);
+    if (folderId !== null) await getOwnedFolder(ctx, userId, folderId);
+    if (!Number.isFinite(size) || size < 0) throw new Error("Invalid file size.");
+    const bytes = Math.floor(size);
+    const chunkCount = bytes === 0 ? 0 : Math.ceil(bytes / CHUNK_BYTES);
+    const fileId = await ctx.db.insert("files", {
+      name: cleanName(name),
+      size: bytes,
+      mimeType: mimeType || "application/octet-stream",
+      folderId,
+      userId,
+      createdAt: Date.now(),
+      status: "uploading",
+      chunkCount,
+      parts: [],
+    });
+    return { fileId, chunkCount };
+  },
+});
+
+export const getChunkUploadUrl = mutation({
+  args: { fileId: v.id("files"), index: v.number() },
+  handler: async (ctx, { fileId, index }) => {
+    const userId = await requireUser(ctx);
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) throw new Error("Upload not found.");
+    if (file.status !== "uploading") throw new Error("Upload already finished.");
+    if (index < 0 || index >= file.chunkCount) {
+      throw new Error("That part is out of range.");
+    }
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
+export const finishUpload = mutation({
+  args: { fileId: v.id("files") },
+  handler: async (ctx, { fileId }) => {
+    const userId = await requireUser(ctx);
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) throw new Error("Upload not found.");
+    if (file.parts.length !== file.chunkCount) {
+      throw new Error("Some parts never arrived — try uploading again.");
+    }
+    await ctx.db.patch(fileId, { status: "ready" });
+  },
+});
+
+export const renameFile = mutation({
+  args: { fileId: v.id("files"), name: v.string() },
+  handler: async (ctx, { fileId, name }) => {
+    const userId = await requireUser(ctx);
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) throw new Error("File not found.");
+    await ctx.db.patch(fileId, { name: cleanName(name) });
+  },
+});
+
+export const moveFile = mutation({
+  args: {
+    fileId: v.id("files"),
+    folderId: v.union(v.id("folders"), v.null()),
+  },
+  handler: async (ctx, { fileId, folderId }) => {
+    const userId = await requireUser(ctx);
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) throw new Error("File not found.");
+    if (folderId !== null) await getOwnedFolder(ctx, userId, folderId);
+    await ctx.db.patch(fileId, { folderId });
+  },
+});
+
+/**
+ * Mints a short-lived token for the HTTP download route. The route needs no
+ * session of its own, so the browser can fetch one part after another with it.
+ */
+export const createDownloadToken = mutation({
+  args: { fileId: v.id("files") },
+  handler: async (ctx, { fileId }) => {
+    const userId = await requireUser(ctx);
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) throw new Error("File not found.");
+    if (file.status !== "ready") throw new Error("That file is still uploading.");
+
+    const now = Date.now();
+    const stale = await ctx.db
+      .query("downloadTokens")
+      .withIndex("by_user_expiry", (q) =>
+        q.eq("userId", userId).lt("expiresAt", now),
+      )
+      .take(25);
+    for (const token of stale) await ctx.db.delete(token._id);
+
+    const token =
+      crypto.randomUUID().replace(/-/g, "") +
+      crypto.randomUUID().replace(/-/g, "");
+    await ctx.db.insert("downloadTokens", {
+      token,
+      fileId,
+      userId,
+      expiresAt: now + DOWNLOAD_TOKEN_TTL_MS,
+    });
+    return token;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Internal reads — reachable only from other Convex functions
+// ---------------------------------------------------------------------------
+
+/** Full config including the token. Never handed back to the client. */
+export const getTelegramConfigDoc = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    return await ctx.db
+      .query("telegramConfig")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .unique();
+  },
+});
+
+export const getFileForUpload = internalQuery({
+  args: { fileId: v.id("files"), userId: v.id("users") },
+  handler: async (ctx, { fileId, userId }) => {
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) return null;
+    return {
+      name: file.name,
+      chunkCount: file.chunkCount,
+      status: file.status,
+    };
+  },
+});
+
+/** Resolves a download token + part index into the Telegram handle to stream. */
+export const resolveDownload = internalQuery({
+  args: { token: v.string(), index: v.number() },
+  handler: async (ctx, { token, index }) => {
+    const record = await ctx.db
+      .query("downloadTokens")
+      .withIndex("by_token", (q) => q.eq("token", token))
+      .unique();
+    if (!record || record.expiresAt < Date.now()) return null;
+
+    const file = await ctx.db.get(record.fileId);
+    if (!file || file.status !== "ready") return null;
+    if (index < 0 || index >= file.chunkCount) return null;
+    const part = file.parts[index];
+    if (!part) return null;
+
+    const config = await ctx.db
+      .query("telegramConfig")
+      .withIndex("by_user", (q) => q.eq("userId", record.userId))
+      .unique();
+    if (!config?.botToken || !config.chatId) return null;
+
+    return {
+      telegramFileId: part.fileId,
+      botToken: config.botToken,
+      chatId: config.chatId,
+      partCount: file.chunkCount,
+      fileName: file.name,
+      mimeType: file.mimeType,
+    };
+  },
+});
+
+export const collectFile = internalQuery({
+  args: { fileId: v.id("files"), userId: v.id("users") },
+  handler: async (ctx, { fileId, userId }) => {
+    const file = await ctx.db.get(fileId);
+    if (!file || file.userId !== userId) throw new Error("File not found.");
+    return {
+      folderIds: [] as Id<"folders">[],
+      fileIds: [fileId],
+      messageIds: file.parts
+        .map((part) => part.messageId)
+        .filter((id): id is number => id !== undefined),
+    };
+  },
+});
+
+/** Gathers a folder, everything beneath it, and their Telegram message ids. */
+export const collectFolder = internalQuery({
+  args: { folderId: v.id("folders"), userId: v.id("users") },
+  handler: async (ctx, { folderId, userId }) => {
+    const folders = await ctx.db
+      .query("folders")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    const known = new Map(folders.map((folder) => [folder._id, folder]));
+    if (!known.has(folderId)) throw new Error("That folder no longer exists.");
+
+    const children = new Map<string, Id<"folders">[]>();
+    for (const folder of folders) {
+      if (folder.parentId === null) continue;
+      const siblings = children.get(folder.parentId) ?? [];
+      siblings.push(folder._id);
+      children.set(folder.parentId, siblings);
+    }
+
+    const folderIds: Id<"folders">[] = [];
+    const queue: Id<"folders">[] = [folderId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      folderIds.push(current);
+      queue.push(...(children.get(current) ?? []));
+    }
+
+    const inSubtree = new Set<string>(folderIds);
+    const files = await ctx.db
+      .query("files")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    const fileIds: Id<"files">[] = [];
+    const messageIds: number[] = [];
+    for (const file of files) {
+      if (file.folderId === null || !inSubtree.has(file.folderId)) continue;
+      fileIds.push(file._id);
+      for (const part of file.parts) {
+        if (part.messageId !== undefined) messageIds.push(part.messageId);
+      }
+    }
+    return { folderIds, fileIds, messageIds };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Internal writes
+// ---------------------------------------------------------------------------
+
+export const saveTelegramConfig = internalMutation({
+  args: {
+    userId: v.id("users"),
+    botToken: v.string(),
+    botUsername: v.string(),
+    resetChat: v.boolean(),
+  },
+  handler: async (ctx, { userId, botToken, botUsername, resetChat }) => {
+    const existing = await ctx.db
+      .query("telegramConfig")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .unique();
+    const botChanged =
+      existing?.botUsername !== undefined &&
+      existing.botUsername !== botUsername;
+    const dropChat = resetChat || botChanged;
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        botToken,
+        botUsername,
+        updatedAt: Date.now(),
+        ...(dropChat ? { chatId: undefined, chatTitle: undefined } : {}),
+      });
+    } else {
+      await ctx.db.insert("telegramConfig", {
+        userId,
+        botToken,
+        botUsername,
+        updatedAt: Date.now(),
+      });
+    }
+  },
+});
+
+export const saveChat = internalMutation({
+  args: {
+    userId: v.id("users"),
+    chatId: v.string(),
+    chatTitle: v.optional(v.string()),
+  },
+  handler: async (ctx, { userId, chatId, chatTitle }) => {
+    const existing = await ctx.db
+      .query("telegramConfig")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .unique();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        chatId,
+        chatTitle,
+        updatedAt: Date.now(),
+      });
+    } else {
+      await ctx.db.insert("telegramConfig", {
+        userId,
+        chatId,
+        chatTitle,
+        updatedAt: Date.now(),
+      });
+    }
+  },
+});
+
+/** Records one part after it landed in Telegram. */
+export const recordPart = internalMutation({
+  args: {
+    fileId: v.id("files"),
+    index: v.number(),
+    telegramFileId: v.string(),
+    messageId: v.optional(v.number()),
+  },
+  handler: async (ctx, { fileId, index, telegramFileId, messageId }) => {
+    const file = await ctx.db.get(fileId);
+    if (!file) return;
+    const parts = [...file.parts];
+    parts[index] = { fileId: telegramFileId, messageId };
+    await ctx.db.patch(fileId, { parts });
+  },
+});
+
+/** Deletes records after their Telegram messages have been cleaned up. */
+export const removeRecords = internalMutation({
+  args: {
+    folderIds: v.array(v.id("folders")),
+    fileIds: v.array(v.id("files")),
+  },
+  handler: async (ctx, { folderIds, fileIds }) => {
+    for (const folderId of folderIds) {
+      const folder = await ctx.db.get(folderId);
+      if (folder) await ctx.db.delete(folderId);
+    }
+    for (const fileId of fileIds) {
+      const file = await ctx.db.get(fileId);
+      if (file) await ctx.db.delete(fileId);
+    }
+  },
+});

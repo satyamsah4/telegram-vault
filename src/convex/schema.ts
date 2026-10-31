@@ -1,0 +1,91 @@
+import { authTables } from "@convex-dev/auth/server";
+import { defineSchema, defineTable } from "convex/server";
+import { Infer, v } from "convex/values";
+
+// default user roles. can add / remove based on the project as needed
+export const ROLES = {
+  ADMIN: "admin",
+  USER: "user",
+  MEMBER: "member",
+} as const;
+
+export const roleValidator = v.union(
+  v.literal(ROLES.ADMIN),
+  v.literal(ROLES.USER),
+  v.literal(ROLES.MEMBER),
+);
+export type Role = Infer<typeof roleValidator>;
+
+const schema = defineSchema(
+  {
+    // default auth tables using convex auth.
+    ...authTables, // do not remove or modify
+
+    // the users table is the default users table that is brought in by the authTables
+    users: defineTable({
+      name: v.optional(v.string()), // name of the user. do not remove
+      image: v.optional(v.string()), // image of the user. do not remove
+      email: v.optional(v.string()), // email of the user. do not remove
+      emailVerificationTime: v.optional(v.number()), // email verification time. do not remove
+      isAnonymous: v.optional(v.boolean()), // is the user anonymous. do not remove
+
+      role: v.optional(roleValidator), // role of the user. do not remove
+    }).index("email", ["email"]), // index for the email. do not remove or modify
+
+    // Folder tree. parentId === null means "root".
+    folders: defineTable({
+      name: v.string(),
+      parentId: v.union(v.id("folders"), v.null()),
+      userId: v.id("users"),
+      createdAt: v.number(),
+    })
+      .index("by_user", ["userId"])
+      .index("by_user_parent", ["userId", "parentId"]),
+
+    // Files live in a folder (or the root) and are stored as Telegram parts.
+    files: defineTable({
+      name: v.string(),
+      size: v.number(),
+      mimeType: v.string(),
+      folderId: v.union(v.id("folders"), v.null()),
+      userId: v.id("users"),
+      createdAt: v.number(),
+      status: v.union(v.literal("uploading"), v.literal("ready")),
+      chunkCount: v.number(),
+      /** Telegram file_id (+ message id for clean-up) for each part, in order. */
+      parts: v.array(
+        v.object({
+          fileId: v.string(),
+          messageId: v.optional(v.number()),
+        }),
+      ),
+    })
+      .index("by_user", ["userId"])
+      .index("by_user_folder", ["userId", "folderId"]),
+
+    // Per-user Telegram connection. The bot token never leaves the server.
+    telegramConfig: defineTable({
+      userId: v.id("users"),
+      botToken: v.optional(v.string()),
+      botUsername: v.optional(v.string()),
+      chatId: v.optional(v.string()),
+      chatTitle: v.optional(v.string()),
+      updatedAt: v.number(),
+    }).index("by_user", ["userId"]),
+
+    // Short-lived tokens that unlock a streamed download.
+    downloadTokens: defineTable({
+      token: v.string(),
+      fileId: v.id("files"),
+      userId: v.id("users"),
+      expiresAt: v.number(),
+    })
+      .index("by_token", ["token"])
+      .index("by_user_expiry", ["userId", "expiresAt"]),
+  },
+  {
+    schemaValidation: false,
+  },
+);
+
+export default schema;
