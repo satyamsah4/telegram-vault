@@ -29,6 +29,9 @@ import {
   Upload,
 } from "lucide-react";
 
+/** A file as the list sees it — its Telegram parts never leave the server. */
+export type ListedFile = Omit<Doc<"files">, "parts">;
+
 function iconForFile(name: string) {
   const extension = name.split(".").pop()?.toLowerCase() ?? "";
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "avif", "bmp"].includes(extension)) {
@@ -71,18 +74,18 @@ export function FileList({
   onDeleteFile,
 }: {
   folders: Doc<"folders">[];
-  files: Doc<"files">[];
+  files: ListedFile[];
   downloads: Record<string, { done: number; total: number }>;
   onOpenFolder: (id: Id<"folders">) => void;
-  onDownload: (file: Doc<"files">) => Promise<void>;
+  onDownload: (file: ListedFile) => Promise<void>;
   onNewFolder: () => void;
   onUpload: () => void;
   onRenameFolder: (folder: Doc<"folders">) => void;
   onMoveFolder: (folder: Doc<"folders">) => void;
   onDeleteFolder: (folder: Doc<"folders">) => void;
-  onRenameFile: (file: Doc<"files">) => void;
-  onMoveFile: (file: Doc<"files">) => void;
-  onDeleteFile: (file: Doc<"files">) => void;
+  onRenameFile: (file: ListedFile) => void;
+  onMoveFile: (file: ListedFile) => void;
+  onDeleteFile: (file: ListedFile) => void;
 }) {
   if (folders.length === 0 && files.length === 0) {
     return (

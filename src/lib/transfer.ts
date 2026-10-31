@@ -34,7 +34,7 @@ function postSlice(
   url: string,
   slice: Blob,
   onLoaded: (loaded: number) => void,
-): Promise<string> {
+): Promise<Id<"_storage">> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("POST", url);
@@ -51,7 +51,7 @@ function postSlice(
           const { storageId } = JSON.parse(request.responseText) as {
             storageId: string;
           };
-          resolve(storageId);
+          resolve(storageId as Id<"_storage">);
         } catch {
           reject(new Error("The upload finished with an unexpected response."));
         }

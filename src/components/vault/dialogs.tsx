@@ -15,7 +15,7 @@ import { errorMessage } from "@/lib/errors";
 import { buildTree } from "@/lib/folders";
 import { cn } from "@/lib/utils";
 import { Check, ChevronRight, Loader2, X } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 
 /** Creates a folder or renames either kind of item. */
 export function NameDialog({
@@ -41,13 +41,16 @@ export function NameDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Re-arm each time the dialog opens — done during render so no effect runs.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) {
       setValue(initialValue);
       setError(null);
       setBusy(false);
     }
-  }, [open, initialValue]);
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -140,13 +143,15 @@ export function MoveDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) {
       setSelected(currentParentId);
       setError(null);
       setBusy(false);
     }
-  }, [open, currentParentId]);
+  }
 
   const rows: { id: Id<"folders"> | null; name: string; depth: number }[] = [
     { id: null, name: "All files", depth: 0 },
@@ -260,12 +265,14 @@ export function ConfirmDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) {
       setError(null);
       setBusy(false);
     }
-  }, [open]);
+  }
 
   async function confirm() {
     if (busy) return;

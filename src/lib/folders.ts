@@ -62,7 +62,7 @@ export function subtreeIds(
     children.set(folder.parentId, list);
   }
   const ids = new Set<string>([rootId]);
-  const queue = [rootId];
+  const queue: string[] = [rootId];
   while (queue.length > 0) {
     const current = queue.shift()!;
     for (const child of children.get(current) ?? []) {

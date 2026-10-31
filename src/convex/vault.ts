@@ -26,15 +26,32 @@ async function requireUser(
 
 /** Normalises user-supplied names: trimmed, flat, bounded. */
 function cleanName(raw: string): string {
-  const cleaned = raw
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .trim()
-    .replace(/[\\/]+/g, "-");
+  const withoutControls = raw
+    .split("")
+    .filter((character) => character >= " " && character !== "\u007f")
+    .join("");
+  const cleaned = withoutControls.trim().replace(/[\\/]+/g, "-");
   if (!cleaned) throw new Error("Give it a name first.");
   if (cleaned.length > MAX_NAME_LENGTH) {
     throw new Error(`Names are limited to ${MAX_NAME_LENGTH} characters.`);
   }
   return cleaned;
+}
+
+/** Everything the client is allowed to see about a stored file. */
+function toListed(file: Doc<"files">) {
+  return {
+    _id: file._id,
+    _creationTime: file._creationTime,
+    name: file.name,
+    size: file.size,
+    mimeType: file.mimeType,
+    folderId: file.folderId,
+    userId: file.userId,
+    createdAt: file.createdAt,
+    status: file.status,
+    chunkCount: file.chunkCount,
+  };
 }
 
 async function getOwnedFolder(
@@ -76,7 +93,7 @@ export const listFiles = query({
       )
       .collect();
     // Parts (the Telegram handles) stay on the server; the list never needs them.
-    return files.map(({ parts: _parts, ...file }) => file);
+    return files.map(toListed);
   },
 });
 
@@ -240,9 +257,11 @@ export const createDownloadToken = mutation({
       .take(25);
     for (const token of stale) await ctx.db.delete(token._id);
 
-    const token =
-      crypto.randomUUID().replace(/-/g, "") +
-      crypto.randomUUID().replace(/-/g, "");
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
     await ctx.db.insert("downloadTokens", {
       token,
       fileId,
@@ -452,6 +471,9 @@ export const recordPart = internalMutation({
     const file = await ctx.db.get(fileId);
     if (!file) return;
     const parts = [...file.parts];
+    // Out-of-order parts would leave holes the schema rejects; leaving it
+    // unrecorded makes finishUpload report an incomplete upload instead.
+    if (index > parts.length) return;
     parts[index] = { fileId: telegramFileId, messageId };
     await ctx.db.patch(fileId, { parts });
   },
