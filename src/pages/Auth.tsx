@@ -16,8 +16,8 @@ import {
 
 import { useAuth } from "@/hooks/use-auth";
 import logo from "@/assets/logo.svg";
-import { ArrowRight, Loader2, Mail, UserX } from "lucide-react";
-import { Suspense, useEffect, useState } from "react";
+import { ArrowRight, Loader2, LogOut, Mail, UserX } from "lucide-react";
+import { Suspense, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 interface AuthProps {
@@ -35,7 +35,13 @@ function resolveRedirectAfterAuth(
 }
 
 function Auth({ redirectAfterAuth }: AuthProps = {}) {
-  const { isLoading: authLoading, isAuthenticated, signIn } = useAuth();
+  const {
+    isLoading: authLoading,
+    isAuthenticated,
+    signIn,
+    signOut,
+    user,
+  } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const redirect = resolveRedirectAfterAuth(
@@ -46,12 +52,8 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
   const [otp, setOtp] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
 
-  useEffect(() => {
-    if (!authLoading && isAuthenticated) {
-      navigate(redirect);
-    }
-  }, [authLoading, isAuthenticated, navigate, redirect]);
   const handleEmailSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsLoading(true);
@@ -109,6 +111,24 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
     }
   };
 
+  // Signed-in visitors are not bounced away from this page: pressing Back
+  // from the vault used to land here only to be shoved forward again, and a
+  // guest session had no way back to a sign-in form. The page states where
+  // you are and offers both routes out.
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    setError(null);
+    try {
+      await signOut();
+      setStep("signIn");
+    } catch (caught) {
+      console.error("Sign-out error:", caught);
+      setError("Couldn't sign out. Please try again.");
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col">
 
@@ -117,7 +137,53 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
       <div className="flex-1 flex items-center justify-center">
         <div className="flex items-center justify-center h-full flex-col">
         <Card className="min-w-[350px] pb-0 border shadow-md">
-          {step === "signIn" ? (
+          {authLoading ? (
+            <div className="flex items-center justify-center px-6 py-12">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : isAuthenticated ? (
+            <>
+              <CardHeader className="text-center">
+                <div className="flex justify-center">
+                  <img
+                    src={logo}
+                    alt="Telegram Vault"
+                    width={64}
+                    height={64}
+                    className="rounded-lg mb-4 mt-4 cursor-pointer"
+                    onClick={() => navigate("/")}
+                  />
+                </div>
+                <CardTitle className="text-xl">You're signed in</CardTitle>
+                <CardDescription>
+                  {user?.email ?? user?.name ?? "Guest session"} — continue
+                  into the vault, or sign out to use a different account.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2 pb-6">
+                <Button className="w-full" onClick={() => navigate(redirect)}>
+                  Continue to the vault
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={handleSignOut}
+                  disabled={signingOut}
+                >
+                  {signingOut ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <LogOut className="mr-2 h-4 w-4" />
+                  )}
+                  Sign out
+                </Button>
+                {error && (
+                  <p className="text-sm text-red-500 text-center">{error}</p>
+                )}
+              </CardContent>
+            </>
+          ) : step === "signIn" ? (
             <>
               <CardHeader className="text-center">
               <div className="flex justify-center">

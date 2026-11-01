@@ -1,4 +1,5 @@
 import { BrandMark } from "@/components/Brand";
+import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -6,8 +7,16 @@ import { errorMessage } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 import { useAction } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { ArrowRight, Check, Loader2, Send, ShieldCheck } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  Loader2,
+  LogOut,
+  Send,
+  ShieldCheck,
+} from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { useNavigate } from "react-router";
 
 export interface TelegramStatus {
   hasToken: boolean;
@@ -74,6 +83,8 @@ export function ConnectPanel({
 }) {
   const connectBot = useAction(api.telegram.connectBot);
   const detectChat = useAction(api.telegram.detectChat);
+  const { signOut } = useAuth();
+  const navigate = useNavigate();
 
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<null | "bot" | "chat">(null);
@@ -81,6 +92,16 @@ export function ConnectPanel({
 
   const hasBot = status.hasToken && !!status.botUsername;
   const done = status.hasToken && status.chatConnected;
+
+  // This screen is full-page (no sidebar), so without an escape hatch a
+  // guest who lands here has no way back to a sign-in form.
+  async function handleSignOut() {
+    try {
+      await signOut();
+    } finally {
+      navigate("/auth");
+    }
+  }
 
   async function submitToken(event: FormEvent) {
     event.preventDefault();
@@ -115,16 +136,27 @@ export function ConnectPanel({
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-5 py-12">
       <div className="w-full max-w-xl">
-        <div className="mb-8 flex items-center gap-3">
-          <BrandMark className="size-10" />
-          <div>
-            <p className="text-[15px] font-semibold tracking-[-0.01em]">
-              Connect your Telegram vault
-            </p>
-            <p className="text-sm text-muted-foreground">
-              Two minutes of setup, once. Then it's just folders and files.
-            </p>
+        <div className="mb-8 flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <BrandMark className="size-10" />
+            <div>
+              <p className="text-[15px] font-semibold tracking-[-0.01em]">
+                Connect your Telegram vault
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Two minutes of setup, once. Then it's just folders and files.
+              </p>
+            </div>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="shrink-0 text-muted-foreground"
+            onClick={handleSignOut}
+          >
+            <LogOut className="mr-2 size-4" />
+            Sign out
+          </Button>
         </div>
 
         <div className="rounded-2xl border border-border/70 bg-card p-6 shadow-card sm:p-7">
