@@ -12,6 +12,7 @@ import { formatBytes, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import {
   Download,
+  Eye,
   File as FileIcon,
   FileCode,
   FileArchive,
@@ -63,6 +64,7 @@ export function FileList({
   files,
   downloads,
   onOpenFolder,
+  onOpen,
   onDownload,
   onNewFolder,
   onUpload,
@@ -77,6 +79,7 @@ export function FileList({
   files: ListedFile[];
   downloads: Record<string, { done: number; total: number }>;
   onOpenFolder: (id: Id<"folders">) => void;
+  onOpen: (file: ListedFile) => void;
   onDownload: (file: ListedFile) => Promise<void>;
   onNewFolder: () => void;
   onUpload: () => void;
@@ -207,8 +210,8 @@ export function FileList({
             <button
               type="button"
               disabled={uploading}
-              title={uploading ? "Still uploading" : `Download ${file.name}`}
-              onClick={() => onDownload(file).catch((error) => console.error(errorMessage(error)))}
+              title={uploading ? "Still uploading" : `Open ${file.name}`}
+              onClick={() => onOpen(file)}
               className="min-w-0 flex-1 truncate text-left text-sm tracking-[-0.005em] transition-colors hover:text-[var(--brand)] disabled:cursor-default disabled:hover:text-foreground"
             >
               {file.name}
@@ -241,6 +244,13 @@ export function FileList({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuItem
+                  disabled={uploading}
+                  onClick={() => onOpen(file)}
+                >
+                  <Eye className="mr-2 size-4" />
+                  Open
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={uploading}
                   onClick={() =>

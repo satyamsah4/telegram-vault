@@ -1,4 +1,5 @@
 import { httpRouter } from "convex/server";
+import { mimeForFile } from "../lib/mime";
 import { auth } from "./auth";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
@@ -18,6 +19,17 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+/** Types that can run code if opened as a document; they get a sandbox. */
+const ACTIVE_TYPES = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "image/svg+xml",
+  "application/xml",
+  "text/xml",
+  "application/javascript",
+  "text/javascript",
+]);
+
 function textResponse(status: number, body: string): Response {
   return new Response(body, {
     status,
@@ -29,12 +41,261 @@ function textResponse(status: number, body: string): Response {
   });
 }
 
+/** `filename*` encoding (RFC 5987), including what encodeURIComponent spares. */
+function filenameStar(fileName: string): string {
+  return encodeURIComponent(fileName).replace(
+    /['()!*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
 /**
- * `GET /file/:token/:index` — streams one 18 MB part of a stored file.
+ * Inline rendering with an ASCII fallback name — the browser decides what a
+ * PDF or a video means instead of being told to save it.
+ */
+function inlineDisposition(fileName: string): string {
+  const ascii = fileName
+    .replace(/[^\u0020-\u007e]/g, "_")
+    .replace(/["\\]/g, "_");
+  return `inline; filename="${ascii}"; filename*=UTF-8''${filenameStar(fileName)}`;
+}
+
+/**
+ * Resolves one part's Telegram handle and opens its byte stream. `file_path`
+ * is only guaranteed fresh for an hour, so ask for it on every use.
+ */
+async function openPart(
+  botToken: string,
+  telegramFileId: string,
+): Promise<ReadableStream<Uint8Array>> {
+  const meta = (await fetch(
+    `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(
+      telegramFileId,
+    )}`,
+  ).then((res) => res.json())) as {
+    ok: boolean;
+    result?: { file_path?: string };
+    description?: string;
+  };
+  if (!meta.ok || !meta.result?.file_path) {
+    throw new Error("Telegram could not produce this file.");
+  }
+  const upstream = await fetch(
+    `https://api.telegram.org/file/bot${botToken}/${meta.result.file_path}`,
+  );
+  if (!upstream.ok || !upstream.body) {
+    throw new Error("Telegram could not serve this file.");
+  }
+  return upstream.body;
+}
+
+type ByteRange = { start: number; end: number };
+
+/**
+ * Single-range parsing per RFC 7233. Returns null for "no range / a form we
+ * don't handle" (serve the whole file), or "unsatisfiable" for 416.
+ */
+function parseRangeHeader(
+  header: string | null,
+  size: number,
+): ByteRange | "unsatisfiable" | null {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === "" && rawEnd === "") return null;
+
+  if (rawStart === "") {
+    // Suffix form: `bytes=-500` means the last 500 bytes.
+    const suffix = Number(rawEnd);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return "unsatisfiable";
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start)) return "unsatisfiable";
+  if (start >= size) return "unsatisfiable";
+  if (rawEnd === "") return { start, end: size - 1 };
+
+  const requestedEnd = Number(rawEnd);
+  if (!Number.isSafeInteger(requestedEnd) || start > requestedEnd) {
+    return "unsatisfiable";
+  }
+  return { start, end: Math.min(requestedEnd, size - 1) };
+}
+
+/** Keeps only `take` bytes of `source`, dropping `skip` bytes up front. */
+function takeBytes(
+  source: ReadableStream<Uint8Array>,
+  skip: number,
+  take: number,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let skipped = 0;
+  let remaining = take;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      for (;;) {
+        if (remaining <= 0) {
+          controller.close();
+          await reader.cancel().catch(() => {});
+          return;
+        }
+        const { value, done } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        let chunk = value;
+        if (skipped < skip) {
+          const drop = Math.min(skip - skipped, chunk.byteLength);
+          skipped += drop;
+          chunk = chunk.subarray(drop);
+        }
+        if (chunk.byteLength === 0) continue;
+        if (chunk.byteLength > remaining) chunk = chunk.subarray(0, remaining);
+        remaining -= chunk.byteLength;
+        controller.enqueue(chunk);
+        if (remaining <= 0) {
+          controller.close();
+          await reader.cancel().catch(() => {});
+        }
+        return;
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    },
+  });
+}
+
+/**
+ * Serves the requested byte window by walking only the parts it touches. The
+ * next part's fetch starts while the current one streams, so playback never
+ * waits on a round trip it could have hidden.
+ */
+function streamRange(
+  partIds: string[],
+  chunkBytes: number,
+  botToken: string,
+  start: number,
+  end: number,
+  size: number,
+): ReadableStream<Uint8Array> {
+  const openers = new Map<number, Promise<ReadableStream<Uint8Array>>>();
+  const open = (index: number) => {
+    let pending = openers.get(index);
+    if (!pending) {
+      pending = openPart(botToken, partIds[index]);
+      openers.set(index, pending);
+      // A prefetched part may go unread if the client stops early.
+      pending.catch(() => {});
+    }
+    return pending;
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        let cursor = start;
+        while (cursor <= end) {
+          const index = Math.min(
+            Math.floor(cursor / chunkBytes),
+            partIds.length - 1,
+          );
+          const partStart = index * chunkBytes;
+          const partEnd = Math.min(partStart + chunkBytes, size) - 1;
+          const take = Math.min(end, partEnd) - cursor + 1;
+          if (index + 1 < partIds.length) void open(index + 1);
+
+          const slice = takeBytes(await open(index), cursor - partStart, take);
+          const reader = slice.getReader();
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          cursor += take;
+        }
+        controller.close();
+      } catch (error) {
+        // Headers are already out; dropping the stream surfaces as a failed
+        // load rather than a silently truncated file.
+        controller.error(error);
+      }
+    },
+  });
+}
+
+/**
+ * `GET /file/:token` — the whole file as one real, browser-viewable resource.
  *
- * Parts, not whole files, because Telegram only serves back files up to 20 MB
- * while the browser reassembles the pieces. Streaming keeps the response well
- * inside the memory limits instead of buffering the part first.
+ * Parts, not whole files, live in Telegram, but the browser never sees that:
+ * this route concatenates them on the way out with the correct type, length
+ * and range support, so an `<img>`, `<video>`, or PDF viewer can load it the
+ * same way it would load any other URL — including seeking, which is why the
+ * byte window of a range request maps straight onto the parts it covers.
+ */
+const downloadWhole = httpAction(async (ctx, request) => {
+  const { pathname } = new URL(request.url);
+  const [, route, token] = pathname.split("/");
+  if (route !== "file" || !token) return textResponse(404, "Not found");
+
+  const file = await ctx.runQuery(internal.vault.resolveWholeFile, { token });
+  if (!file) return textResponse(410, "This download link has expired.");
+
+  const contentType = mimeForFile(file.fileName, file.mimeType);
+  const headers: Record<string, string> = {
+    ...CORS_HEADERS,
+    "Content-Type": contentType,
+    "Content-Disposition": inlineDisposition(file.fileName),
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=600",
+    "X-Content-Type-Options": "nosniff",
+  };
+  if (ACTIVE_TYPES.has(contentType)) {
+    // HTML/SVG/XML opened as a document stay inert — no scripts, no forms.
+    headers["Content-Security-Policy"] = "sandbox";
+  }
+
+  if (file.size === 0 || file.partIds.length === 0) {
+    headers["Content-Length"] = "0";
+    return new Response(null, { status: 200, headers });
+  }
+
+  const range = parseRangeHeader(request.headers.get("Range"), file.size);
+  if (range === "unsatisfiable") {
+    return new Response("Requested range not satisfiable.", {
+      status: 416,
+      headers: {
+        ...CORS_HEADERS,
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Range": `bytes */${file.size}`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  const start = range ? range.start : 0;
+  const end = range ? range.end : file.size - 1;
+  headers["Content-Length"] = String(end - start + 1);
+  if (range) headers["Content-Range"] = `bytes ${start}-${end}/${file.size}`;
+
+  const stream = streamRange(
+    file.partIds,
+    file.chunkBytes,
+    file.botToken,
+    start,
+    end,
+    file.size,
+  );
+  return new Response(stream, { status: range ? 206 : 200, headers });
+});
+
+/**
+ * `GET /file/:token/:index` — streams one 18 MB part, kept for the download
+ * loop in the app, which writes part by part so large saves stream straight
+ * to disk instead of assembling in memory.
  */
 const downloadPart = httpAction(async (ctx, request) => {
   const { pathname } = new URL(request.url);
@@ -54,50 +315,14 @@ const downloadPart = httpAction(async (ctx, request) => {
     return textResponse(410, "This download link has expired.");
   }
 
-  // file_path is only guaranteed fresh for an hour, so ask for it every time.
-  let filePath: string | undefined;
+  let upstream: ReadableStream<Uint8Array>;
   try {
-    const meta = (await fetch(
-      `https://api.telegram.org/bot${part.botToken}/getFile?file_id=${encodeURIComponent(
-        part.telegramFileId,
-      )}`,
-    ).then((res) => res.json())) as {
-      ok: boolean;
-      result?: { file_path?: string };
-      description?: string;
-    };
-    if (meta.ok) filePath = meta.result?.file_path;
+    upstream = await openPart(part.botToken, part.telegramFileId);
   } catch {
-    filePath = undefined;
-  }
-  if (!filePath) {
-    return textResponse(502, "Telegram could not produce this file.");
-  }
-
-  const upstream = await fetch(
-    `https://api.telegram.org/file/bot${part.botToken}/${filePath}`,
-  );
-  if (!upstream.ok || !upstream.body) {
     return textResponse(502, "Telegram could not serve this file.");
   }
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const reader = upstream.body!.getReader();
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          controller.enqueue(value);
-        }
-        controller.close();
-      } catch (error) {
-        controller.error(error);
-      }
-    },
-  });
-
-  return new Response(stream, {
+  return new Response(upstream, {
     status: 200,
     headers: {
       ...CORS_HEADERS,
@@ -108,14 +333,18 @@ const downloadPart = httpAction(async (ctx, request) => {
   });
 });
 
-http.route({ path: "/file/:token/:index", method: "GET", handler: downloadPart });
+const corsPreflight = httpAction(async () => {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+});
 
+http.route({ path: "/file/:token", method: "GET", handler: downloadWhole });
+http.route({ path: "/file/:token", method: "OPTIONS", handler: corsPreflight });
+
+http.route({ path: "/file/:token/:index", method: "GET", handler: downloadPart });
 http.route({
   path: "/file/:token/:index",
   method: "OPTIONS",
-  handler: httpAction(async () => {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
-  }),
+  handler: corsPreflight,
 });
 
 export default http;

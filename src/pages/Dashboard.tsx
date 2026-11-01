@@ -12,6 +12,7 @@ import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
 import { ConnectPanel, type TelegramStatus } from "@/components/vault/ConnectPanel";
 import { FileList, type ListedFile } from "@/components/vault/FileList";
+import { FileViewer } from "@/components/vault/FileViewer";
 import { FolderTree } from "@/components/vault/FolderTree";
 import { ConfirmDialog, MoveDialog, NameDialog } from "@/components/vault/dialogs";
 import { UploadQueue } from "@/components/vault/UploadQueue";
@@ -149,6 +150,13 @@ export default function Dashboard() {
   const removeFolder = useAction(api.telegram.removeFolder);
 
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [viewerFileId, setViewerFileId] = useState<Id<"files"> | null>(null);
+  // Follows the live record, so a rename shows instantly and a deletion
+  // closes the viewer on its own.
+  const viewerFile =
+    viewerFileId === null
+      ? null
+      : listedFiles.find((file) => file._id === viewerFileId) ?? null;
   const [uploads, setUploads] = useState<UploadState[]>([]);
   const [downloads, setDownloads] = useState<
     Record<string, { done: number; total: number }>
@@ -449,6 +457,7 @@ export default function Dashboard() {
                     files={listedFiles}
                     downloads={downloads}
                     onOpenFolder={navigateTo}
+                    onOpen={(file) => setViewerFileId(file._id)}
                     onDownload={handleDownload}
                     onNewFolder={() => setDialog({ kind: "newFolder" })}
                     onUpload={() => fileInputRef.current?.click()}
@@ -633,6 +642,12 @@ export default function Dashboard() {
           if (dialog?.kind !== "deleteFile") return;
           await handleDeleteFile(dialog.file);
         }}
+      />
+
+      <FileViewer
+        file={viewerFile}
+        onClose={() => setViewerFileId(null)}
+        onDownload={handleDownload}
       />
     </div>
   );

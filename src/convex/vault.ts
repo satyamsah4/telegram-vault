@@ -179,6 +179,7 @@ export const createFile = mutation({
       createdAt: Date.now(),
       status: "uploading",
       chunkCount,
+      chunkBytes: CHUNK_BYTES,
       parts: [],
     });
     return { fileId, chunkCount };
@@ -296,6 +297,40 @@ export const getFileForUpload = internalQuery({
       name: file.name,
       chunkCount: file.chunkCount,
       status: file.status,
+    };
+  },
+});
+
+/**
+ * Resolves a download token into everything the whole-file HTTP route needs:
+ * the real filename and type, the byte layout, and the part handles. Parts
+ * never leave the server through this path — only the assembled bytes do.
+ */
+export const resolveWholeFile = internalQuery({
+  args: { token: v.string() },
+  handler: async (ctx, { token }) => {
+    const record = await ctx.db
+      .query("downloadTokens")
+      .withIndex("by_token", (q) => q.eq("token", token))
+      .unique();
+    if (!record || record.expiresAt < Date.now()) return null;
+
+    const file = await ctx.db.get(record.fileId);
+    if (!file || file.status !== "ready") return null;
+
+    const config = await ctx.db
+      .query("telegramConfig")
+      .withIndex("by_user", (q) => q.eq("userId", record.userId))
+      .unique();
+    if (!config?.botToken || !config.chatId) return null;
+
+    return {
+      fileName: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      chunkBytes: file.chunkBytes ?? CHUNK_BYTES,
+      botToken: config.botToken,
+      partIds: file.parts.map((part) => part.fileId),
     };
   },
 });

@@ -52,6 +52,13 @@ const schema = defineSchema(
       createdAt: v.number(),
       status: v.union(v.literal("uploading"), v.literal("ready")),
       chunkCount: v.number(),
+      /**
+       * The part size this file was written with. Whole-file streaming walks
+       * parts by byte offset, so the layout must stay knowable even if the
+       * default chunk size ever changes. Optional: records written before it
+       * existed were chunked with the current default.
+       */
+      chunkBytes: v.optional(v.number()),
       /** Telegram file_id (+ message id for clean-up) for each part, in order. */
       parts: v.array(
         v.object({
