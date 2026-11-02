@@ -304,7 +304,7 @@ export function ConnectPanel({
             <p className="text-xs text-muted-foreground">
               {connected
                 ? "You can come back here any time to change bots."
-                : "Version 1 is built for exactly one owner."}
+                : "Every account gets its own bot and its own storage."}
             </p>
             <div className="flex gap-2">
               {connected && onBack ? (

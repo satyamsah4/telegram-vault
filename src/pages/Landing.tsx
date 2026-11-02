@@ -116,8 +116,8 @@ const FEATURES = [
   },
   {
     icon: User,
-    title: "Built for one",
-    body: "No teams, no seats, no sharing links to leak. Version 1 assumes the only person here is you.",
+    title: "One vault per person",
+    body: "Sign in, connect your own bot, and everything you store stays scoped to your account — no one else can see a thing.",
   },
 ];
 
@@ -299,7 +299,7 @@ export default function Landing() {
               <Reveal>
                 <span className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-card px-3 py-1 text-xs font-medium text-muted-foreground shadow-sm">
                   <span className="size-1.5 rounded-full bg-[var(--brand)]" />
-                  Version 1 · one owner, no ceiling
+                  Version 1 · your vault, no ceiling
                 </span>
               </Reveal>
 
@@ -338,7 +338,10 @@ export default function Landing() {
                   {[
                     { value: "0", label: "storage quota to manage" },
                     { value: `${PART_MB} MB`, label: "parts, any file size" },
-                    { value: "1", label: "owner in the whole app" },
+                    {
+                      value: "∞",
+                      label: "accounts, each with a private vault",
+                    },
                   ].map((stat) => (
                     <div key={stat.label}>
                       <dt className="font-mono-nums text-2xl font-semibold tracking-[-0.02em]">
@@ -520,7 +523,8 @@ export default function Landing() {
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-5 px-5 sm:flex-row sm:px-6">
           <BrandWordmark />
           <p className="text-center text-xs leading-5 text-muted-foreground sm:text-left">
-            Built for exactly one person. Storage by Telegram's cloud.
+            Built for anyone who wants their files back. Storage by
+            Telegram's cloud.
           </p>
           <div className="flex items-center gap-5 text-xs text-muted-foreground">
             <Link to="/auth" className="transition-colors hover:text-foreground">

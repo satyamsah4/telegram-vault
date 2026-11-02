@@ -1,5 +1,5 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   CHUNK_BYTES,
   DOWNLOAD_TOKEN_TTL_MS,
@@ -20,7 +20,11 @@ async function requireUser(
   ctx: QueryCtx | MutationCtx,
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
-  if (userId === null) throw new Error("You need to sign in to do that.");
+  // ConvexError, not Error: production deployments redact plain error
+  // messages to "Server Error"; this one is meant for the person clicking.
+  if (userId === null) {
+    throw new ConvexError("You need to sign in to do that.");
+  }
   return userId;
 }
 
