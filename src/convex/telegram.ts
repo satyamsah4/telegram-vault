@@ -1,7 +1,7 @@
 "use node";
 
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { action, type ActionCtx } from "./_generated/server";
@@ -92,14 +92,19 @@ async function telegram<T>(
       continue;
     }
     if ((data.error_code ?? 0) >= 500) continue;
-    throw new Error(lastError);
+    // ConvexError (not Error): production deployments redact plain error
+    // messages to "Server Error", but ConvexError data always reaches the
+    // client — these messages exist for the person clicking the button.
+    throw new ConvexError(lastError);
   }
-  throw new Error(lastError);
+  throw new ConvexError(lastError);
 }
 
 async function requireUser(ctx: ActionCtx): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
-  if (userId === null) throw new Error("You need to sign in to do that.");
+  if (userId === null) {
+    throw new ConvexError("You need to sign in to do that.");
+  }
   return userId;
 }
 
@@ -250,9 +255,11 @@ export const connectBot = action({
   handler: async (ctx, { botToken }) => {
     const userId = await requireUser(ctx);
     const token = botToken.trim();
-    if (!token) throw new Error("Paste the token BotFather gave you.");
+    if (!token) {
+      throw new ConvexError("Paste the token BotFather gave you.");
+    }
     if (!/^\d{5,}:[A-Za-z0-9_-]{10,}$/.test(token)) {
-      throw new Error(
+      throw new ConvexError(
         "That doesn't look like a bot token — it looks like 123456789:AA....",
       );
     }
@@ -260,13 +267,15 @@ export const connectBot = action({
     try {
       me = await telegram<BotInfo>("getMe", token, { json: {} });
     } catch (error) {
-      throw new Error(
+      throw new ConvexError(
         `Telegram rejected that token. ${
           error instanceof Error ? error.message : "Check it in @BotFather."
         }`,
       );
     }
-    if (!me.username) throw new Error("That bot has no username yet.");
+    if (!me.username) {
+      throw new ConvexError("That bot has no username yet.");
+    }
     await ctx.runMutation(internal.vault.saveTelegramConfig, {
       userId,
       botToken: token,
@@ -282,7 +291,7 @@ export const detectChat = action({
   handler: async (ctx) => {
     const userId = await requireUser(ctx);
     const bot = await resolveBot(ctx, userId);
-    if (!bot) throw new Error("Connect your bot token first.");
+    if (!bot) throw new ConvexError("Connect your bot token first.");
 
     // A webhook would make getUpdates fail with a conflict.
     await telegram("deleteWebhook", bot.token, { json: {} }).catch(() => {});
@@ -295,7 +304,7 @@ export const detectChat = action({
     );
     const latest = fromUser[fromUser.length - 1];
     if (!latest?.message) {
-      throw new Error(
+      throw new ConvexError(
         "No Start message yet — open your bot in Telegram, press Start, then try again.",
       );
     }
