@@ -17,7 +17,7 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import logo from "@/assets/logo.svg";
 import { ArrowRight, Loader2, LogOut, Mail, UserX } from "lucide-react";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 interface AuthProps {
@@ -53,6 +53,18 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+
+  // Leaving for Google (or any navigation with the spinner on) and pressing
+  // Back restores this page from the back/forward cache with `isLoading` still
+  // true, leaving every button disabled — the "paused" screen. Re-enable the
+  // form whenever the browser restores a cached page.
+  useEffect(() => {
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) setIsLoading(false);
+    };
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, []);
 
   const handleEmailSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
